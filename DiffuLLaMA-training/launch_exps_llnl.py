@@ -23,8 +23,8 @@ QOS = "pbatch"
 # BANK = "guests"
 BANK = "effml"
 
-TIME_LIMIT = 29
-# TIME_LIMIT = 59
+# TIME_LIMIT = 29
+TIME_LIMIT = 59
 # TIME_LIMIT = 360
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/DiffuLLaMA/DiffuLLaMA-training/outputs"
@@ -34,12 +34,12 @@ BASE_RUN_NAME = f"debug"
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
 
-NODES = 1
-GPN = 1
+# NODES = 1
+# GPN = 1
 # NODES = 1
 # GPN = 4
-# NODES = 4
-# GPN = 4
+NODES = 4
+GPN = 4
 
 MODEL_PATH="/p/vast1/pretrain/models/Llama-2-7b-hf"
 DATASET_PATH="/p/vast1/pretrain/datasets/diffusion/dolma_v1-6_sample_llama2_pkds"
