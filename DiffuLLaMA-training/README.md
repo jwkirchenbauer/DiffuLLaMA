@@ -1,3 +1,64 @@
+# Notes for Tuo
+
+- repo install script should work, just requires base conda like always on Tuo
+
+- they used Tinyllama's data prep...sigh. So, I've copied in our spiritual successors from litgptdev and we can use that to create initial testing data. However near immediate todo will be to integrate the better parquet dataset implementation that we've developed for the retrieval project (based on Jonas' version for recurrent project).
+
+
+### Data prep 
+
+status: TBD
+
+Needs cpus, just like the installer, so allocate something like
+
+flux alloc -q pbatch --bank=guests --job-name=tokenize -t240 -N1 -n1 -g1 -c96 -ofastload -o mpibind=off --exclusive --unbuffered --label-io
+
+```
+export RAW_DATASET_PATH=/p/vast1/pretrain/from_frontier/datasets/fiction/dolma_v1_6-sample/train_shuffled && \
+export MODEL_PATH=/p/vast1/pretrain/models/Llama-2-7b-hf && \
+export DST_PATH=/p/vast1/pretrain/datasets/diffusion/dolma_v1-6_sample_llama2_pkds && \
+python litgptdev_prepare_hf.py \
+    --dataset_name_or_path=$RAW_DATASET_PATH \
+    --ld_from_disk=True \
+    --prefix_type=None \
+    --checkpoint_dir=$MODEL_PATH \
+    --add_bos=False \
+    --add_eos=True \
+    --chunk_size=1049088 \
+    --skip_remainder=True \
+    --destination_path=$DST_PATH \
+    --num_proc=32
+
+>
+...
+INFO:root:Building finished! Took 8.4mins
+INFO:root:Dataset written to /p/vast1/pretrain/datasets/diffusion/dolma_v1-6_sample_llama2_pkds
+INFO:root:Total chunks/files written across all 70 shards: 8273
+INFO:root:Total tokens written across all chunks in all shards: 8.7B
+INFO:root:Total trailing separator tokens written across all chunks in all shards: 9
+INFO:root:Total skipped tokens across all shards: 40.4M
+INFO:root:Packing overhead ratio: 9 / 8.7B = 0.0%
+INFO:root:Cleanup cache files returned: 0
+```
+
+
+### Training test 
+
+status: TBD 
+
+automated launch in `launch_exps_llnl.py`
+
+```
+1N1n
+
+
+
+```
+
+
+### Orig README below
+---
+
 # Overview
 Training scripts for training large diffusion language models (e.g., Llama 7B).
 

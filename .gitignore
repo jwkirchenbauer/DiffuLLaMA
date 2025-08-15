@@ -166,5 +166,6 @@ cache/
 config/
 saves/
 output/
+outputs/
 wandb/
 **__pycache__**

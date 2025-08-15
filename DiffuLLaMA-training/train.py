@@ -32,9 +32,12 @@ from easy_context import (
 )
 apply_unsloth_offloaded_gradient_checkpoint_monkey_patch()
 
+# train_data_config = [
+#     ("train_slim", 0.693584),
+#     ("train_star", 0.306416),
+# ]
 train_data_config = [
-    ("train_slim", 0.693584),
-    ("train_star", 0.306416),
+    ("data", 1.0),
 ]
 val_data_config = None
 
@@ -54,7 +57,8 @@ def create_dataloader(
         filenames = sorted(glob.glob(str(data_dir / f"{prefix}*")))
         random.seed(seed)
         random.shuffle(filenames)
-
+        # FIXME, not absolutely necessary but we could swap these to our versions
+        # real solution is fully replacing with pqds so maybe not worth it.
         dataset = PackedDataset(
             filenames,
             # n_chunks control the buffer size. 
