@@ -17,15 +17,15 @@ RCCL_INSTALL_DIR = (
 ROCM_VERSION = "6.3.0"
 RCCL_CFG = "rdzv-lbann"
 
-# QOS = "pdebug"
-QOS = "pbatch"
+QOS = "pdebug"
+# QOS = "pbatch"
 
-# BANK = "guests"
-BANK = "effml"
+BANK = "guests"
+# BANK = "effml"
 
 # TIME_LIMIT = 29
 TIME_LIMIT = 59
-# TIME_LIMIT = 360
+# TIME_LIMIT = 1440
 
 BASE_OUT_DIR = f"/p/vast1/kirchenb/diffusion-root/DiffuLLaMA/DiffuLLaMA-training/outputs"
 
@@ -34,46 +34,75 @@ BASE_RUN_NAME = f"debug"
 WANDB_OFFLINE = False
 # WANDB_OFFLINE = True
 
-# NODES = 1
-# GPN = 1
-# NODES = 1
-# GPN = 4
-NODES = 4
-GPN = 4
-
 MODEL_PATH="/p/vast1/pretrain/models/Llama-2-7b-hf"
 DATASET_PATH="/p/vast1/pretrain/datasets/diffusion/dolma_v1-6_sample_llama2_pkds"
 
-run_name = f"diffusion_llama2-7b_N{NODES}n{NODES*GPN}"
+# MAX_TRAIN_STEPS = 50
 
-ACCEL_CONFIG="accelerate_configs/multi_node_tuo.yaml"
+# MAX_TRAIN_STEPS = 2067 # 65e9 toks /(16N*4gpn*60mbsz*4accum*2048slen) = 2066.3 steps
+# something is fishy here about how App B.2 in https://arxiv.org/pdf/2410.17891 reports this
+# versus the args in the repo. Forex, the token bsz is 31M toks per step in this cfg... how/why?
+# That said, this would be one way to interpret it I guess, and it could be order 2 days on 16N
+MAX_TRAIN_STEPS = 1938 # 65e9 toks /(16N*4gpn*60mbsz*4accum*2048slen) = 1937.1 steps
 
-ACCEL_PREAMBLE=f"accelerate launch \
-    --config_file {ACCEL_CONFIG} \
-    --main_process_ip $MASTER_ADDR \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $SLURM_NODEID \
-    --num_machines $SLURM_NNODES \
-    --num_processes $SLURM_NTASKS \
-"""
-
-# Cfgs
+# static cfgs and then swept params
 exp_list = [
     [f"""\
-{ACCEL_PREAMBLE} \
-train.py \
---batch-size 60 \
---gradient-accumulate-every 4  \
---seed 2829 \
+python -u train.py \
 --wandb Diffusion \
---max-train-steps 20000  \
---learning-rate 1.5e-5  \
+--seed 2829 \
+--max-train-steps {MAX_TRAIN_STEPS}  \
+--learning-rate 2e-5  \
 --dataset {DATASET_PATH} \
---model {MODEL_PATH}  \
---seq-length 2048 \
+--model {MODEL_PATH} \
 --parallel_mode data_parallel \
-""", run_name]
+"""]
 ]
+
+# GPN = 1
+GPN = 4
+
+# nodes
+sweep_hparam = [
+# 1,
+# 2,
+# 4,
+# 8,
+16
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+
+# mbsz
+sweep_hparam = [
+# 1,
+# 2,
+# 4,
+# 8,
+16,
+# 32,
+# 64,
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+# accum
+sweep_hparam = [
+# 1,
+# 2,
+# 4,
+# 8,
+16,
+# 64,
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
+
+# seq len
+sweep_hparam = [
+# 128,
+# 1024,
+2048,
+]
+exp_list = list(chain(*[[exp + [hp] for hp in sweep_hparam] for exp in exp_list]))
 
 
 final_exp_list = exp_list
@@ -86,12 +115,18 @@ total_launches = 0
 for exp in final_exp_list:
 
     (
-        script,
-        run_name,
+        script_w_args,
+        nodes,
+        mbsz,
+        accum,
+        seq_len,
     ) = exp
 
     # put together the actual "train.py" command
-    custom_invocation = f"{script}"
+    custom_invocation = f"{script_w_args}"
+
+    # run_name = f"diffusion_llama2-7b_N{nodes}n{nodes*GPN}"
+    run_name = f"diffusion_llama2-7b_mb{mbsz}_acc{accum}_sl{seq_len}_N{nodes}n{nodes*GPN}"
 
     # make the complete launcher command
     command = f"""\
@@ -104,10 +139,10 @@ for exp in final_exp_list:
         --qos={QOS} \
         --bank={BANK} \
         --minutes={TIME_LIMIT} \
-        --nodes={NODES} \
+        --nodes={nodes} \
         --gpus_per_node={GPN} \
         --run_name={run_name} \
-        --custom_invocation='{custom_invocation} --output-dir={BASE_OUT_DIR}/{BASE_RUN_NAME}/{run_name}' \
+        --custom_invocation='{custom_invocation} --batch-size {mbsz} --gradient-accumulate-every {accum} --seq-length {seq_len} --output-dir={BASE_OUT_DIR}/{BASE_RUN_NAME}/{run_name}' \
         --pass_run_name=False \
         {'--dryrun' if WRITE_ONLY else ''}
     """
@@ -116,6 +151,6 @@ for exp in final_exp_list:
         os.system(command)
     else:
         print(run_name)
-        print(command)
+        # print(command)
 
 print(f"Total launches: {total_launches}")

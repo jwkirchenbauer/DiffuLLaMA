@@ -141,8 +141,18 @@ def main(args):
         # fsdp_plugin=fsdp_plugin,
     )
     accelerator.init_trackers(project_name=args.wandb, init_kwargs={"wandb":{"name":args.output_dir.split("/")[-1]}})
-    accelerator.print(f"Total GPUS: {accelerator.num_processes}")
-    
+    # accelerator.print(f"Total GPUS: {accelerator.num_processes}")
+    accelerator.wait_for_everyone()
+    # this should be 0th only
+    accelerator.print(f"os.environ['WORLD_SIZE'] = {os.environ['WORLD_SIZE']} | accelerator.num_processes = {accelerator.num_processes}\n")
+    # then all processes sound off
+    dist_env_readout = (
+        f"os.environ['RANK'] = {os.environ['RANK']} | accelerator.process_index = {accelerator.process_index}\n"
+        f"os.environ['LOCAL_RANK'] = {os.environ['LOCAL_RANK']} | accelerator.local_process_index = {accelerator.local_process_index} | accelerator.device={accelerator.device}\n"
+    )
+    # this is a bit verbose and out of order but it gets the job done
+    print(dist_env_readout)
+    accelerator.wait_for_everyone()
    
     train_loader, val_dataloader = create_dataloaders(
         batch_size=args.batch_size,
@@ -170,15 +180,47 @@ def main(args):
 
     if args.learning_rate != 2e-5:
         accelerator.print(f"Warning: You also need to modify accelerate_configs/zero3_offload.json to change the learning rate")
-    optim = DummyOptim(model.parameters(), lr=args.learning_rate)
-    scheduler = DummyScheduler(
+    # NOTE since we are bypassing deepspeed at the moment, then these deepspeed dummy classes 
+    # are never replaced with real ones. We could gate this instantiation by parallelism choice in the future 
+    # if need be.
+    # optim = DummyOptim(model.parameters(), lr=args.learning_rate)
+    # scheduler = DummyScheduler(
+    #     optim,
+    #     num_training_steps=args.max_train_steps,
+    #     total_num_steps=args.max_train_steps,
+    # )
+    from torch.optim import AdamW
+    from torch.optim.lr_scheduler import LinearLR
+    optim = AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        betas=[0.9, 0.95],
+        eps=1e-8,
+        weight_decay=0.1,
+    )
+    # this is a degenerate schedule but matches their zero3.json file
+    # and the constant lr with no warmup described in the paper
+    scheduler = LinearLR(
         optim,
-        num_training_steps=args.max_train_steps,
-        total_num_steps=args.max_train_steps,
+        start_factor=1.0, # * base lr
+        end_factor=1.0, # * base lr
+        total_iters=args.max_train_steps,
     )
     model, optim, scheduler = accelerator.prepare(model, optim, scheduler)
     train_loader = prepare_dataloader(args.parallel_mode, train_loader, accelerator)
-    model.gradient_checkpointing_enable()
+    
+    # model.gradient_checkpointing_enable()
+    # NOTE this is an odd thing to have be incorrect out of box but ...
+    from torch.nn.parallel.distributed import DistributedDataParallel
+    from transformers import PreTrainedModel
+    # if we're in doing simple dist data parallel training, then the model returned by accelerator
+    # is wrapped in the DDP class
+    if isinstance(model, DistributedDataParallel):
+        assert isinstance(model.module, PreTrainedModel), "Why isn't this a hf model?"
+        model.module.gradient_checkpointing_enable()
+    else:
+        assert isinstance(model, PreTrainedModel), "Why isn't this a hf model?"
+        model.gradient_checkpointing_enable()
 
     accelerator.register_for_checkpointing(scheduler)
 
@@ -255,6 +297,12 @@ def main(args):
                     "ppl": math.exp(gathered_loss.item()),
                 }
                 accelerator.log(loss_log, step=completed_steps)
+
+                # NOTE deepspeed was handling this so we probably need to do it if we're not using deepspeed
+                # that said Im not sure it fixes the spiking/nan-ing issue in the math.exp above
+                # so FIXME?
+                max_grad_norm = 1.0
+                accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
 
             optim.step()
             scheduler.step()
