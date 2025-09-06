@@ -139,6 +139,7 @@ def main(args):
         log_with="wandb" if args.wandb else None,
         kwargs_handlers=[timeout],
         # fsdp_plugin=fsdp_plugin,
+        step_scheduler_with_optimizer=False,
     )
     accelerator.init_trackers(project_name=args.wandb, init_kwargs={"wandb":{"name":args.output_dir.split("/")[-1]}})
     # accelerator.print(f"Total GPUS: {accelerator.num_processes}")
@@ -176,7 +177,7 @@ def main(args):
     )
     apply_seq_parallel_monkey_patch(args.parallel_mode, model_type)
 
-   
+    # model = torch.compile(model)
 
     if args.learning_rate != 2e-5:
         accelerator.print(f"Warning: You also need to modify accelerate_configs/zero3_offload.json to change the learning rate")
@@ -189,23 +190,41 @@ def main(args):
     #     num_training_steps=args.max_train_steps,
     #     total_num_steps=args.max_train_steps,
     # )
-    from torch.optim import AdamW
-    from torch.optim.lr_scheduler import LinearLR
-    optim = AdamW(
+    from torch.optim import Adam
+    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, ConstantLR
+    optim = Adam(
         model.parameters(),
         lr=args.learning_rate,
         betas=[0.9, 0.95],
         eps=1e-8,
         weight_decay=0.1,
     )
-    # this is a degenerate schedule but matches their zero3.json file
-    # and the constant lr with no warmup described in the paper
-    scheduler = LinearLR(
+    # orignally this was a degenerate schedule but matched their zero3.json file
+    # and the constant lr with no warmup described in the paper ...
+    
+    # but now swapping to the warmup->cosine sched of diffucoder
+    
+    # debugging sequential logic
+    # warmup_scheduler = ConstantLR(optim, factor=1e-1, total_iters=args.warmup_steps)
+    # cos_decay_scheduler = ConstantLR(optim, factor=1e-3, total_iters=args.max_train_steps-args.warmup_steps)
+
+    warmup_scheduler = LinearLR(
         optim,
-        start_factor=1.0, # * base lr
-        end_factor=1.0, # * base lr
-        total_iters=args.max_train_steps,
+        start_factor=1e-5, # small_value * peak lr
+        # end_factor=1.0, # 1.0 * base lr = peak lr
+        total_iters=args.warmup_steps-1,
     )
+    cos_decay_scheduler = CosineAnnealingLR(
+        optim, 
+        eta_min=args.min_learning_rate,
+        T_max=args.max_train_steps-args.warmup_steps-1,
+    )
+    scheduler = SequentialLR(
+        optim,
+        schedulers=[warmup_scheduler, cos_decay_scheduler],
+        milestones=[args.warmup_steps],
+    )
+
     model, optim, scheduler = accelerator.prepare(model, optim, scheduler)
     train_loader = prepare_dataloader(args.parallel_mode, train_loader, accelerator)
     
@@ -229,6 +248,7 @@ def main(args):
         range(args.max_train_steps), disable=not accelerator.is_local_main_process
     )
     completed_steps = 0
+    batches_consumed = 0
 
     model.train()
     loss_func = CrossEntropyLoss(inplace_backward=True,reduction='none')
@@ -282,6 +302,8 @@ def main(args):
             loss = (dsigma[:, None] * loss).sum() / loss_mask.sum()   # avg token loss
             accelerator.backward(loss)
 
+            batches_consumed += 1
+
             if accelerator.sync_gradients:
                 # pay attention here. When any seq parallel algo is turned on. This technically only log the very first chunk's loss
                 # and what is the first chunk really depends on how do you shard the sequence
@@ -292,9 +314,20 @@ def main(args):
                 # we now try gathered loss to verify if ring attention and dist flash attention produce the same loss
                 # this may slow down the training
                 gathered_loss = accelerator.reduce(loss.clone().detach(), "mean")
+
+                # this can error
+                try:
+                    ppl = math.exp(gathered_loss.item())
+                except:
+                    ppl = float('nan')
+
                 loss_log = {
                     "loss": gathered_loss.item(),
-                    "ppl": math.exp(gathered_loss.item()),
+                    "ppl": ppl,
+                    "lr": optim.param_groups[-1]['lr'],
+                    "completed_steps":completed_steps,
+                    "batches_consumed":batches_consumed,
+                    "tokens":accelerator.num_processes*args.batch_size*args.seq_length*batches_consumed,
                 }
                 accelerator.log(loss_log, step=completed_steps)
 
@@ -345,7 +378,9 @@ if __name__ == "__main__":
     args.add_argument("--wandb", type=str)
     args.add_argument("--seed", type=int, default=42)
     args.add_argument("--max-train-steps", type=int, default=400)
+    args.add_argument("--warmup-steps", type=int, default=0)
     args.add_argument("--learning-rate", type=float, default=2e-5)
+    args.add_argument("--min-learning-rate", type=float, default=2e-6)
     args.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     args.add_argument(
         "--dataset",
